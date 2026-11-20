@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GPU 压缩纹理制作与验证</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>GPU 块压缩纹理工具链 — 真实设备验证</h1>
+    <p class="sub">
+      加载 <code>.gtex</code> 容器，按容器描述的块对齐尺寸与 mip 偏移在 WebGPU 上创建真实压缩纹理，
+      实际采样并回读，与规范参考解码器逐纹素比对。回退路径显式标注，不与压缩成功混淆。
+    </p>
+  </header>
+
+  <section class="panel">
+    <div class="status-row">
+      <span id="adapter-info" class="badge">adapter: …</span>
+      <span id="bc-feature" class="badge">BC feature: …</span>
+      <span id="format-status" class="badge">format: …</span>
+    </div>
+    <div id="fatal" class="fatal hidden"></div>
+
+    <div class="controls">
+      <label>纹理
+        <select id="texture-select">
+          <option value="0">soft-blob（非整块 33x27，半透明边缘，sRGB）</option>
+          <option value="1">high-freq（非整块 50x38，高频图案，sRGB）</option>
+          <option value="2">linear-data（32x32，线性数据纹理）</option>
+        </select>
+      </label>
+      <label>编码格式
+        <select id="format-select">
+          <option value="0x314342">BC1 (BC4_UNORM_BLOCK，4bpp，1-bit alpha)</option>
+          <option value="0x334342" selected>BC3 (BC7_UNORM_BLOCK，独立 alpha 块)</option>
+          <option value="0x424752">RGBA8（未压缩回退负载）</option>
+        </select>
+      </label>
+      <label>Mip 等级 <input id="mip-slider" type="range" min="0" max="5" value="0" /></label>
+      <label>缩放 <input id="zoom-slider" type="range" min="1" max="16" value="8" />
+        <span id="zoom-value">8x</span></label>
+      <label><input id="force-fallback" type="checkbox" /> 强制回退 RGBA8</label>
+      <label><input id="show-error" type="checkbox" checked /> 显示误差热图</label>
+      <label><input id="transfer-override" type="checkbox" /> 对线性纹理套用 sRGB 解释（传递函数错误示范）</label>
+    </div>
+    <div id="container-info" class="mono">container: …</div>
+    <div id="gpu-cpu-psnr" class="badge">GPU vs CPU: …</div>
+  </section>
+
+  <section class="panel">
+    <h2>容器回读：负载 / mip 偏移与块边界</h2>
+    <div class="table-wrap">
+      <table id="offset-table">
+        <thead>
+          <tr><th>负载</th><th>mip</th><th>逻辑尺寸</th><th>块对齐尺寸</th><th>blob 偏移</th><th>字节数</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel canvas-grid">
+    <figure>
+      <figcaption>原图（CPU 参考解码，当前 mip）</figcaption>
+      <canvas id="canvas-original"></canvas>
+    </figure>
+    <figure>
+      <figcaption>GPU 实际采样回读（真实图形接口）</figcaption>
+      <canvas id="canvas-gpu"></canvas>
+    </figure>
+    <figure>
+      <figcaption>逐纹素误差热图（实际计算）</figcaption>
+      <canvas id="canvas-error"></canvas>
+    </figure>
+  </section>
+
+  <section class="panel">
+    <h2>完整 mip 链（CPU 参考解码，逐级比较）</h2>
+    <div id="mip-chain" class="mip-chain"></div>
+  </section>
+
+  <section class="panel">
+    <h2>事件与异常提示</h2>
+    <div id="log" class="log"></div>
+  </section>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

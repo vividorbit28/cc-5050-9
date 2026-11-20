@@ -1,0 +1,16 @@
+{
+  "name": "gpu-texture-toolchain",
+  "version": "1.0.0",
+  "description": "GPU block-compressed texture authoring, container and WebGPU validation toolchain",
+  "type": "module",
+  "scripts": {
+    "make-assets": "node cli/make-textures.js",
+    "pack": "node cli/gtex-cli.js pack-all",
+    "verify": "node cli/gtex-cli.js verify",
+    "test": "node test/run-tests.js",
+    "start": "node tools/serve.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
