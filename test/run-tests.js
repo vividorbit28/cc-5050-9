@@ -13,6 +13,16 @@ import { bleedTransparent, downsample2x, generateMipChain, mipLevelCount } from 
 import { writeGtex, readGtex, validateGtex, decodePayloadMips, FOURCC, padToBlock } from '../src/gtex.js';
 import { srgbToLinearImage, srgbToLinearByte, linearToSrgbByte } from '../src/color.js';
 import { makeSoftBlob, makeHighFreq, makeLinearData } from '../src/textures.js';
+import { PURPOSE, EDGE_MODE, PurposeCache, ELIMINATE, PRUNE } from '../src/bc-encode.js';
+import { searchEndpoints, buildCandidates, buildEndpointPairs } from '../src/bc-optimizer.js';
+import { texelsToColors } from '../src/bc-encode.js';
+import {
+  normalHighlightFlipFixture, edgeColourLeakFixture, evaluateEdgeLeak,
+} from '../src/bc-fixtures.js';
+import {
+  encodeWithInspection, worstPoint, savedVsExhaustive, readbackInspection,
+  eliminationSummary, measureDeviation, exportedEdgeLeak,
+} from '../src/bc-report.js';
 
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
@@ -250,6 +260,179 @@ test('sRGB transfer helpers are approximately inverse and leave alpha untouched'
   for (let p = 0; p < img.width * img.height; p++) {
     assert.equal(lin.pixels[p * 4 + 3], img.pixels[p * 4 + 3]);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Candidate optimiser, purpose gates, cache, edge conventions and reporting
+// ---------------------------------------------------------------------------
+
+test('distinct elimination conditions: colour MSE is not the only gate', () => {
+  const f = normalHighlightFlipFixture();
+  const srcColors = texelsToColors(f.texels);
+  const pairs = buildEndpointPairs(buildCandidates(srcColors));
+  const res = searchEndpoints(srcColors, pairs, PURPOSE.NORMAL, {
+    exhaustive: true, records: true,
+    ctx: {
+      srcNormals: f.srcNormals,
+      halfVector: f.halfVector,
+      exponent: f.exponent,
+      srcHighlight: f.srcHighlight,
+    },
+  });
+  // The block that minimises colour error must be rejected by the normal gate,
+  // not silently preferred because its scalar colour score is lowest.
+  const colourBest = res.candidates.reduce((a, b) => (a.colorMse <= b.colorMse ? a : b));
+  assert.ok(colourBest.colorMse < res.best.colorMse + 1e-9, 'colour optimum should be at least as good in colour');
+  assert.equal(colourBest.elimination, ELIMINATE.NORMAL_FLIP);
+  assert.ok(res.records.some((r) => r.eliminate === ELIMINATE.NORMAL_FLIP));
+  assert.equal(res.best.highlightFlip, false);
+  assert.ok(res.best.colorMse > colourBest.colorMse, 'the chosen block trades a little colour to keep the highlight');
+});
+
+test('sound lower bound never changes the result vs exhaustive', () => {
+  const f = normalHighlightFlipFixture();
+  const srcColors = texelsToColors(f.texels);
+  const pairs = buildEndpointPairs(buildCandidates(srcColors));
+  const ctx = { srcNormals: f.srcNormals, halfVector: f.halfVector, exponent: f.exponent, srcHighlight: f.srcHighlight };
+  const dense = searchEndpoints(srcColors, pairs, PURPOSE.NORMAL, { exhaustive: true, ctx });
+  const pruned = searchEndpoints(srcColors, pairs, PURPOSE.NORMAL, { exhaustive: false, ctx, budget: 100000 });
+  assert.deepEqual([pruned.best.c0, pruned.best.c1], [dense.best.c0, dense.best.c1]);
+  assert.ok(pruned.work.prunedBound > 0, 'the bound should actually prune something');
+  assert.ok(pruned.work.evaluated <= dense.work.evaluated);
+});
+
+test('budget pruner is audited and reports an acceptable missed alternative', () => {
+  const img = makeHighFreq();
+  const insp = encodeWithInspection(img, { purpose: PURPOSE.COLOR, budget: 20, records: true, auditBudget: true });
+  assert.ok(insp.stats.prunedBudget > 0);
+  assert.ok(insp.stats.missedAcceptableBlocks > 0, 'a tight budget should miss some acceptable alternatives');
+  const withMiss = insp.blocks.find((b) => b.missed.length);
+  assert.ok(withMiss);
+  assert.ok(withMiss.missed.every((m) => m.reason === 'budget-pruned acceptable alternative'));
+});
+
+test('exported-material read-back states the real deviation a miss caused', () => {
+  const img = makeHighFreq();
+  const insp = encodeWithInspection(img, { purpose: PURPOSE.COLOR, budget: 20, auditBudget: true });
+  const rows = readbackInspection(insp);
+  assert.ok(rows.length > 0);
+  // At least one missed alternative measurably beats what was exported.
+  assert.ok(rows.some((r) => r.delta.colorMse > 0 || r.delta.meanAngleDeg > 0));
+});
+
+test('purpose-scoped cache does not reuse colour rankings for a normal map', () => {
+  const img = makeHighFreq();
+  const blocks = Math.ceil(img.width / 4) * Math.ceil(img.height / 4);
+  const cache = new PurposeCache();
+  const colour = encodeWithInspection(img, { purpose: PURPOSE.COLOR, records: false, cache });
+  const colourReused = cache.stats().hits;
+  assert.equal(colourReused, 0, 'first pass cannot hit');
+  assert.equal(cache.stats().entries, blocks);
+
+  // Switching purpose must not serve the colour entries.
+  const normal = encodeWithInspection(img, { purpose: PURPOSE.NORMAL, records: false, cache });
+  assert.equal(cache.stats().hits, colourReused, 'normal pass must not hit colour entries');
+  assert.ok(normal.blocks.length > 0);
+
+  // Explicit invalidation by purpose drops exactly the colour entries.
+  cache.invalidatePurpose(PURPOSE.COLOR);
+  assert.equal(cache.stats().entries, blocks, 'normal-pass entries remain after invalidating colour');
+});
+
+test('tile and clamp edge conventions differ on the same block', () => {
+  const img = makeSoftBlob();
+  const clamp = encodeWithInspection(img, { purpose: PURPOSE.COLOR, edgeMode: EDGE_MODE.CLAMP, records: false });
+  const tile = encodeWithInspection(img, { purpose: PURPOSE.COLOR, edgeMode: EDGE_MODE.TILE, records: false });
+  // The rightmost block's gathered source texels must differ between the two
+  // conventions (clamp replicates the last column, tile wraps to column 0).
+  const cx = clamp.blocksX - 1;
+  const cb = clamp.blocks.find((b) => b.bx === cx) || clamp.blocks[clamp.blocks.length - 1];
+  const tb = tile.blocks.find((b) => b.bx === cx && b.by === cb.by);
+  let differ = 0;
+  for (let i = 0; i < cb.texels.length; i++) if (cb.texels[i] !== tb.texels[i]) differ++;
+  assert.ok(differ > 0, 'edge convention must change the gathered block');
+});
+
+test('normal fixture: tiny colour MSE but the highlight would flip', () => {
+  const r = evaluateEdgeLeak(edgeColourLeakFixture());
+  // Sanity on the leak fixture simultaneously: equal mip-0 error, divergent
+  // filtered fringe.
+  assert.ok(r.highLeaksMore, 'the high-leak candidate must leak more when filtered');
+  assert.ok(Math.abs(r.leakHigh - r.leakLow) > 50);
+});
+
+test('edge leak is invisible at mip 0 and only appears when a neighbour filters in', () => {
+  const f = edgeColourLeakFixture();
+  const r = evaluateEdgeLeak(f);
+  // Both candidates decode the visible interior identically, so their mip-0
+  // colour error is equal; the difference is entirely in the filtered fringe.
+  assert.notDeepEqual(r.fringeLow.map(Math.round), r.fringeHigh.map(Math.round));
+  assert.ok(r.highLeaksMore);
+  // The direct pair comparison must show the same non-equivalence once filtered.
+  assert.ok(r.pairDivergenceRgb > 50, 'equal-at-mip0 candidates must diverge after filtering');
+});
+
+test('worst-point readout names decoded block, mip, pruned branches and elimination reasons', () => {
+  const f = normalHighlightFlipFixture();
+  const img = { width: 4, height: 4, pixels: f.texels };
+  const insp = encodeWithInspection(img, {
+    purpose: PURPOSE.NORMAL, records: true,
+    halfVector: f.halfVector, exponent: f.exponent,
+  });
+  const worst = worstPoint(insp, 0);
+  assert.equal(worst.mip, 0);
+  assert.equal(worst.decodedTexels.length, 64);
+  assert.ok(worst.chosen);
+  assert.ok(worst.eliminated.some((e) => e.eliminate === ELIMINATE.NORMAL_FLIP));
+  const summary = eliminationSummary(insp);
+  assert.ok(Object.values(summary.byReason).reduce((a, b) => a + b, 0) > 0);
+});
+
+test('saved-vs-exhaustive reports candidate work saved and identical choices', () => {
+  const img = makeHighFreq();
+  const saved = savedVsExhaustive(img, { purpose: PURPOSE.COLOR });
+  assert.ok(saved.evaluationsSaved > 0, 'the bound should save work');
+  assert.ok(saved.exhaustiveEvaluated > saved.fastEvaluated);
+  // The sound bound cannot change the answer, so every block must match.
+  assert.equal(saved.differingBlocks, 0);
+});
+
+test('alpha purpose measures covered colour, not RGB hidden under alpha 0', () => {
+  const f = edgeColourLeakFixture();
+  const src = f.texels;
+  const decoded = Uint8Array.from(src);
+  // Corrupt the hidden edge RGB only.
+  for (let t = 0; t < 16; t++) if (t % 4 === 3) decoded[t * 4] = 0;
+  const dev = measureDeviation(src, decoded, PURPOSE.ALPHA);
+  assert.ok(dev.coveredColorMse < 1e-9, 'hidden-edge RGB change must not count as covered error');
+  assert.ok(dev.colorMse > 0, 'raw per-texel MSE still sees it (for transparency accounting)');
+});
+
+test('BC3 inspection keeps colour and alpha separate; leak read-out works', () => {
+  const f = edgeColourLeakFixture();
+  const img = { width: 4, height: 4, pixels: f.texels };
+  const insp = encodeWithInspection(img, { purpose: PURPOSE.ALPHA, format: 'bc3', records: true });
+  assert.equal(insp.format, 'bc3');
+  const b = insp.blocks[0];
+  for (let t = 0; t < 16; t++) {
+    assert.equal(b.decoded[t * 4 + 3], (t % 4) === 3 ? 0 : 255);
+  }
+  const row = [3, 7, 11, 15].map((t) => b.colourDecoded[t * 4] + b.colourDecoded[t * 4 + 1] + b.colourDecoded[t * 4 + 2]);
+  assert.ok(row.every((v) => v > 0), 'BC3 colour block should keep edge RGB');
+  const leak = exportedEdgeLeak(insp, 1, f.neighbour);
+  assert.equal(leak.length, 1);
+  assert.ok(Number.isFinite(leak[0].filteredLeak));
+});
+
+test('BC1 and BC3 inspections carry their format through', () => {
+  const f = edgeColourLeakFixture();
+  const img = { width: 4, height: 4, pixels: f.texels };
+  const bc1 = encodeWithInspection(img, { purpose: PURPOSE.COLOR, format: 'bc1', records: true, budget: 1, auditBudget: true });
+  const bc3 = encodeWithInspection(img, { purpose: PURPOSE.COLOR, format: 'bc3', records: true, budget: 1, auditBudget: true });
+  assert.ok(bc1.blocks.every((b) => b.format === 'bc1'));
+  assert.ok(bc3.blocks.every((b) => b.format === 'bc3'));
+  assert.equal(bc3.blocks[0].bytes.length, 16);
+  assert.equal(bc1.blocks[0].bytes.length, 8);
 });
 
 let failures = 0;

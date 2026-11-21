@@ -16,6 +16,7 @@ import {
 } from '../src/gtex.js';
 import { psnrFromMse } from '../src/color.js';
 import { makeAllTestTextures } from '../src/textures.js';
+import { normalizeOptions, runOptimizerReport, printOptimizerReport } from '../src/bc-report-cli.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ASSETS = join(ROOT, 'assets');
@@ -162,12 +163,27 @@ switch (cmd) {
   case 'pack': cmdPack(rest[0], rest[1], rest[2]); break;
   case 'verify': cmdVerify(rest); break;
   case 'reencode-png': cmdDecodePng(rest[0], rest[1]); break;
+  case 'optimize': cmdOptimize(rest); break;
   default:
     console.log(`usage:
   gtex-cli.js pack-all                       build all test .gtex resources
   gtex-cli.js pack <input.png> <name> [srgb|linear]
   gtex-cli.js verify [file.gtex ...]         structural container verification
   gtex-cli.js reencode-png <in.png> <out.png>
+  gtex-cli.js optimize <texture> [options]   purpose-aware search report
+      textures: soft-blob | high-freq | linear-data | normal-flip | edge-leak
+      --purpose=color|normal|alpha   elimination conditions (default color)
+      --exhaustive                   disable bound/budget pruning (full search)
+      --edge=clamp|tile              edge convention for border blocks
+      --budget=N                     max pairs evaluated per block
+      --mip=N                        inspect mip level N (default 0)
+      --hv=x,y,z --exponent=S        half-vector / Blinn-Phong exponent (normal)
 `);
     process.exit(cmd ? 1 : 0);
+}
+
+function cmdOptimize(argv) {
+  const opts = normalizeOptions(argv);
+  const report = runOptimizerReport(opts);
+  printOptimizerReport(report);
 }

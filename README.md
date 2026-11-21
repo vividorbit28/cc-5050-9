@@ -33,6 +33,52 @@ npm start
   数据错误地经 sRGB 视图采样时暗部被抬亮的差异，事件区同时警告这是错误解释。
 - **容器回读表**：表格列出每个负载每个 mip 的逻辑尺寸、块对齐尺寸、blob 偏移与字节数，
   用于核对层/mip 偏移与块边界是否被正确描述。
+- **候选搜索检查器**：对当前 mip 重新跑一遍按用途的候选搜索，见下节。可在采样视窗直接
+  切回穷举对照；点击画布任意块，沿最差点读出实际解码块、所属 mip 与被剪分支；切换“用途”
+  或“边缘约定”都会按用途/约定失效缓存，不复用旧排序；还可在同一块上切换平铺/钳位比较。
+
+## 按用途的候选淘汰（优化器）
+
+块压缩搜索常把所有误差压成一个标量分数，于是“颜色几乎一样、但把镜面高光挪到另一边”或
+“mip0 看不出、缩小后漏色”的候选会被当成等价。本工具把三类误差作为**各自独立、可分别
+解释**的淘汰条件（`src/bc-optimizer.js` 的 `ELIMINATE`）：
+
+- `colour-error`：块均方色差超过（最优 + 窗口）。
+- `normal-highlight-flip` / `normal-angle`：解码法线的平均偏角超阈值，或高光质心跨过块中线。
+- `alpha-coverage-loss`：源块某边有覆盖、候选却把该边压成全透明（缩小后与相邻块过滤即漏色）。
+
+两类剪枝分开记账（`PRUNE`）：
+
+- `bound`：**可说明依据的误差下界**。每个纹素到端点线段的投影距离 ≤ 到任一调色板项的距离，
+  求和即为总误差的下界；超出颜色窗口的端点对直接跳过，**不会错过可接受解**。
+- `budget`：每块评估的端点对数上限。可能错过可接受解，因此会对被预算剪掉的端点对做审计，
+  在报告里给出“相对穷举错过的可接受解”。
+
+用途、边缘约定、源纹素都参与缓存键（`src/bc-cache.js`），所以**颜色图切为法线图时不会复用
+颜色期的排序**；显式 `invalidatePurpose` / `invalidateEdgeMode` 进一步给出可验证的失效边界。
+
+### 两个对抗性夹具（`src/bc-fixtures.js`）
+
+- `normal-flip`：均方色差极小（MSE≈6.3/65025≈0.01%）却把高光质心从 x=2.51 挪到 x=1.26，
+  被 `normal-highlight-flip` 淘汰；优化器改选颜色略差但高光仍在正确一侧的端点对。
+- `edge-leak`：可见内部完全一致（mip0 色差相等），但右边缘 alpha=0 的概率下藏着不同 RGB。
+  最近采样看不到；缩小后与相邻不透明块做直通 alpha 过滤时，一个候选的漏色（fringe）显著
+  大于另一个——即“等误差候选在相邻纹理参与过滤后不再等价”。
+
+### 报告与回读
+
+`node cli/gtex-cli.js optimize <texture> [...]` 打印：节约的候选评估次数（相对穷举的百分比）、
+最差块的实际解码块与 mip、被 bound/budget 剪掉的分支及理由、各淘汰原因计数与示例，以及
+**在已导出块上的回读**——对被预算错过的候选重新打包解码，给出它真正造成的法线偏角 / 透明度 /
+色差，而不是只看候选元数据。
+
+```bash
+node cli/gtex-cli.js optimize high-freq --purpose=normal --hv=0.902,0.3472,0.2567 --exponent=256
+node cli/gtex-cli.js optimize high-freq --budget=20          # 强制预算剪枝并审计错失解
+node cli/gtex-cli.js optimize soft-blob --edge=tile          # 平铺 vs 钳位
+node cli/gtex-cli.js optimize normal-flip --exhaustive       # 展示高光翻转被淘汰
+node cli/gtex-cli.js optimize edge-leak --format=bc3         # 展示缩小后才出现的漏色
+```
 
 ## 命令行（仅辅助制作与检查）
 
@@ -42,7 +88,7 @@ CLI 负责准备资源文件与做 CPU 侧结构/质量检查，不声明任何�
 npm run make-assets   # 生成测试 PNG（assets/*.png）
 npm run pack          # 等价于 pack-all：生成 assets/*.gtex 并打印逐级 PSNR
 npm run verify        # 容器结构校验（偏移、块边界、mip 几何、blob 重叠）
-npm test              # CPU 回归测试（16 项）
+npm test              # CPU 回归测试（32 项）
 ```
 
 也可打包任意 PNG：
@@ -102,7 +148,9 @@ npm test
 ```
 
 覆盖：PNG 往返、BC1/BC3 块编解码、cutout 与软 alpha 行为、预乘下采样、bleed、mip 几何、
-容器尺寸/偏移/损坏检测、sRGB 传递函数。
+容器尺寸/偏移/损坏检测、sRGB 传递函数，以及优化器：独立淘汰条件、可说明下界不改变结果、
+预算剪枝审计、按用途缓存失效（颜色→法线）、平铺/钳位差异、高光翻转夹具、缩小后才可见的
+边缘漏色夹具、BC3 色彩/alpha 分离与回读、最差点读数与节约算量。
 
 ## 环境限制说明
 

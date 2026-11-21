@@ -82,6 +82,76 @@
   </section>
 
   <section class="panel">
+    <h2>候选搜索检查器（按用途淘汰 / 误差下界 / 缓存 / 边缘约定）</h2>
+    <p class="sub">
+      对当前 mip 的参考解码图重新跑一遍候选搜索：颜色误差、法线偏角、透明边缘覆盖是<b>各自独立的淘汰条件</b>。
+      可切回穷举对比节约的候选算量与错过的可接受解；点击下方画布选择任意块，沿最差点读出实际解码块、采样层级与被剪分支。
+      材质用途从颜色图切到法线图时会按用途失效缓存，不会复用旧排序。
+    </p>
+    <div class="controls">
+      <label>用途
+        <select id="opt-purpose">
+          <option value="color" selected>颜色图（只看颜色误差）</option>
+          <option value="normal">法线图（颜色 + 法线偏角 + 高光翻转）</option>
+          <option value="alpha">透明边缘（颜色 + 边缘覆盖）</option>
+        </select>
+      </label>
+      <label>边缘约定
+        <select id="opt-edge">
+          <option value="clamp" selected>钳位 clamp</option>
+          <option value="tile">平铺 tile</option>
+        </select>
+      </label>
+      <label>格式
+        <select id="opt-format">
+          <option value="bc1" selected>BC1（4 色 / 打孔）</option>
+          <option value="bc3">BC3（独立 alpha 块）</option>
+        </select>
+      </label>
+      <label>候选预算 <input id="opt-budget" type="range" min="10" max="500" step="10" value="60" />
+        <span id="opt-budget-value">60</span></label>
+      <label><input id="opt-exhaustive" type="checkbox" /> 穷举搜索（关闭下界/预算剪枝）</label>
+      <label>光源 H <input id="opt-hv" type="text" value="0.902,0.3472,0.2567" size="18" /></label>
+      <label>高光指数 <input id="opt-exp" type="number" value="256" min="1" max="4096" style="width:70px" /></label>
+      <button id="opt-run" type="button">重新搜索</button>
+    </div>
+
+    <div id="opt-summary" class="mono">尚未运行。</div>
+
+    <div class="inspect-grid">
+      <figure>
+        <figcaption>搜索用参考图（点击选择块）</figcaption>
+        <canvas id="opt-canvas"></canvas>
+      </figure>
+      <figure>
+        <figcaption>选中块的源纹素（上）与解码纹素（下）</figcaption>
+        <div id="opt-swatches"></div>
+      </figure>
+      <figure>
+        <figcaption>该块决策</figcaption>
+        <div id="opt-decision"></div>
+      </figure>
+    </div>
+
+    <h2 style="margin-top:16px">被剪分支与淘汰理由</h2>
+    <ul id="opt-reasons" class="reason-list"></ul>
+
+    <h2 style="margin-top:16px">边缘漏色（缩小后才可见）</h2>
+    <div id="opt-leak" class="mono">—</div>
+
+    <h2 style="margin-top:16px">节约的候选算量 / 错过的可接受解</h2>
+    <div id="opt-savings" class="mono">—</div>
+    <div class="table-wrap">
+      <table id="opt-readback">
+        <thead>
+          <tr><th>块</th><th>导出块偏差</th><th>错失候选偏差</th><th>差值</th><th>错失理由</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
     <h2>事件与异常提示</h2>
     <div id="log" class="log"></div>
   </section>
